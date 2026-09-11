@@ -1,0 +1,40 @@
+name: 'migrate-safe'
+description: 'Check SQL migrations for unsafe patterns that break rolling deployments'
+author: 'Yunare Maia'
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  path:
+    description: 'Path to migration directory'
+    required: false
+    default: '.'
+  config:
+    description: 'Path to config file'
+    required: false
+  allow:
+    description: 'Comma-separated list of codes to allow (e.g., MS005)'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install migrate-safe
+      shell: bash
+      run: pip install migrate-safe
+
+    - name: Run migrate-safe
+      shell: bash
+      run: |
+        ARGS="${{ inputs.path }}"
+        [ -n "${{ inputs.config }}" ] && ARGS="$ARGS --config ${{ inputs.config }}"
+        [ -n "${{ inputs.allow }}" ] && ARGS="$ARGS --allow ${{ inputs.allow }}"
+        migrate-safe $ARGS --format sarif --output results.sarif || true
+        migrate-safe $ARGS
+
+    - name: Upload SARIF
+      if: always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: results.sarif

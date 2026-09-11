@@ -1,0 +1,3 @@
+[migrate-safe]
+allow = ["MS005"]
+ignore-files = ["0001_initial.sql"]
