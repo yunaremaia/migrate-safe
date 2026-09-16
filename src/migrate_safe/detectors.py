@@ -1,140 +1,217 @@
-"""Detectors for unsafe SQL migration patterns."""
+"""Safety detectors for SQL migrations.
 
+Implements 5 core detectors for unsafe Drizzle ORM migration patterns:
+1. DROP COLUMN without prior SET NULL / DROP DEFAULT (two-step)
+2. RENAME COLUMN (breaks old pods immediately)
+3. ADD COLUMN NOT NULL without default (fails on existing rows)
+4. ALTER COLUMN TYPE with incompatible cast
+5. DROP TABLE / DROP TYPE that may still be referenced
+"""
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Iterable
+from enum import Enum
 
-__all__ = ["Finding", "detect_unsafe_migration"]
-
-# Pattern matchers — order matters (more specific first)
-DROP_COLUMN_RE = re.compile(
-    r"ALTER\s+TABLE\s+(?P<table>\w+)\s+DROP\s+COLUMN\s+(?P<column>\w+)",
-    re.IGNORECASE,
-)
-RENAME_COLUMN_RE = re.compile(
-    r"ALTER\s+TABLE\s+(?P<table>\w+)\s+RENAME\s+COLUMN\s+(?P<from>\w+)\s+TO\s+(?P<to>\w+)",
-    re.IGNORECASE,
-)
-ADD_NOT_NULL_RE = re.compile(
-    r"ALTER\s+TABLE\s+(?P<table>\w+)\s+ADD\s+COLUMN\s+(?P<column>\w+)\s+(?P<type>\w+(?:\(\d+\))?)\s+NOT\s+NULL(?!\s+DEFAULT)",
-    re.IGNORECASE,
-)
-ALTER_TYPE_RE = re.compile(
-    r"ALTER\s+TABLE\s+(?P<table>\w+)\s+ALTER\s+COLUMN\s+(?P<column>\w+)\s+TYPE\s+(?P<type>\w+(?:\([^)]*\))?)",
-    re.IGNORECASE,
-)
-DROP_TABLE_RE = re.compile(
-    r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?P<table>\w+)",
-    re.IGNORECASE,
+from .parser import (
+    MigrationFile,
+    StatementType,
 )
 
 
-@dataclass(frozen=True)
+class Severity(Enum):
+    SAFE = "safe"
+    WARNING = "warning"
+    UNSAFE = "unsafe"
+    CRITICAL = "critical"
+
+
+@dataclass
 class Finding:
-    code: str
-    severity: str  # "error" | "warning"
+    severity: Severity
     message: str
-    table: str
-    column: str = ""
-    raw: str = ""
+    migration_file: str
+    line_hint: str = ""
+    suggestion: str = ""
 
-    def to_dict(self) -> dict:
-        return {
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "table": self.table,
-            "column": self.column,
-            "raw": self.raw.strip(),
-        }
+    def __str__(self) -> str:
+        parts = [f"[{self.severity.value.upper()}] {self.message}"]
+        if self.line_hint:
+            parts.append(f"  Location: {self.line_hint}")
+        if self.suggestion:
+            parts.append(f"  Suggestion: {self.suggestion}")
+        return "\n".join(parts)
 
 
-def detect_unsafe_migration(sql: str) -> list[Finding]:
-    """Detect unsafe patterns in a single migration SQL string."""
+def detect_drop_column_unsafe(
+    migration: MigrationFile,
+    known_columns: set[str] | None = None,
+) -> list[Finding]:
+    """Detect DROP COLUMN without prior SET NULL or DROP DEFAULT.
+
+    During rolling deployments, old pods still reading the column crash
+    when it's dropped. Safe pattern: SET NULL → deploy → DROP COLUMN (next PR).
+    """
     findings: list[Finding] = []
-    lines = sql.splitlines()
-
-    for line in lines:
-        stripped = line.strip()
-        # Skip comments
-        if stripped.startswith("--") or stripped.startswith("/*"):
-            continue
-
-        if m := DROP_COLUMN_RE.search(line):
-            findings.append(Finding(
-                code="MS001",
-                severity="error",
-                message=(
-                    f"DROP COLUMN '{m.group('column')}' on table '{m.group('table')}' "
-                    "breaks rolling deployments. Old pods still reading this column will crash. "
-                    "Use a two-step migration: first SET NULL / DROP DEFAULT, deploy, then DROP COLUMN."
-                ),
-                table=m.group("table"),
-                column=m.group("column"),
-                raw=stripped,
-            ))
-
-        if m := RENAME_COLUMN_RE.search(line):
-            findings.append(Finding(
-                code="MS002",
-                severity="error",
-                message=(
-                    f"RENAME COLUMN '{m.group('from')}' → '{m.group('to')}' on table "
-                    f"'{m.group('table')}' breaks old pods immediately. "
-                    "Add a new column, backfill, then drop the old one in a separate PR."
-                ),
-                table=m.group("table"),
-                column=m.group("from"),
-                raw=stripped,
-            ))
-
-        if m := ADD_NOT_NULL_RE.search(line):
-            findings.append(Finding(
-                code="MS003",
-                severity="error",
-                message=(
-                    f"ADD COLUMN '{m.group('column')}' NOT NULL on table '{m.group('table')}' "
-                    "fails on existing rows. Add as nullable, backfill, then set NOT NULL in a follow-up."
-                ),
-                table=m.group("table"),
-                column=m.group("column"),
-                raw=stripped,
-            ))
-
-        if m := ALTER_TYPE_RE.search(line):
-            findings.append(Finding(
-                code="MS004",
-                severity="warning",
-                message=(
-                    f"ALTER COLUMN '{m.group('column')}' TYPE on table '{m.group('table')}' "
-                    "may fail if existing data can't be cast. Consider a cast or USING clause."
-                ),
-                table=m.group("table"),
-                column=m.group("column"),
-                raw=stripped,
-            ))
-
-        if m := DROP_TABLE_RE.search(line):
-            findings.append(Finding(
-                code="MS005",
-                severity="warning",
-                message=(
-                    f"DROP TABLE '{m.group('table')}' — verify no other migration or model "
-                    "still references this table."
-                ),
-                table=m.group("table"),
-                raw=stripped,
-            ))
-
+    for stmt in migration.statements:
+        if stmt.type == StatementType.DROP_COLUMN:
+            loc = f"{migration.path}: {stmt.raw[:80]}..."
+            findings.append(
+                Finding(
+                    severity=Severity.UNSAFE,
+                    message=(
+                        f"DROP COLUMN `{stmt.column}` on `{stmt.table}` — "
+                        "unsafe during rolling deployments"
+                    ),
+                    migration_file=str(migration.path),
+                    line_hint=loc,
+                    suggestion=(
+                        "Two-step migration:\n"
+                        "    Step 1: ALTER TABLE ... ALTER COLUMN ... SET NULL (deploy)\n"
+                        "    Step 2: ALTER TABLE ... DROP COLUMN ... (next PR, after old pods gone)"
+                    ),
+                )
+            )
     return findings
 
 
-def filter_findings(
-    findings: Iterable[Finding],
-    allow: set[str] | None = None,
-) -> list[Finding]:
-    """Filter out allowed codes."""
-    allow = allow or set()
-    return [f for f in findings if f.code not in allow]
+def detect_rename_column(migration: MigrationFile) -> list[Finding]:
+    """Detect RENAME COLUMN — breaks old pods immediately.
+
+    Old pods expect the old column name, new pods expect the new name.
+    No safe rolling deployment path exists.
+    """
+    findings: list[Finding] = []
+    for stmt in migration.statements:
+        if stmt.type == StatementType.RENAME_COLUMN:
+            new_name = stmt.details.get("new_name", "?")
+            loc = f"{migration.path}: {stmt.raw[:80]}..."
+            findings.append(
+                Finding(
+                    severity=Severity.CRITICAL,
+                    message=(
+                        f"RENAME COLUMN `{stmt.column}` → `{new_name}` on `{stmt.table}` — "
+                        "immediately breaks rolling deployments"
+                    ),
+                    migration_file=str(migration.path),
+                    line_hint=loc,
+                    suggestion=(
+                        "Safe alternative:\n"
+                        "    Step 1: ADD COLUMN new_name (with compatible type)\n"
+                        "    Step 2: Backfill new_name from old_name (deploy)\n"
+                        "    Step 3: Update application code to use new_name\n"
+                        "    Step 4: DROP COLUMN old_name (next PR)"
+                    ),
+                )
+            )
+    return findings
+
+
+def detect_add_not_null_no_default(migration: MigrationFile) -> list[Finding]:
+    """Detect ADD COLUMN with NOT NULL but no DEFAULT.
+
+    Fails on existing rows: new column is NULL but NOT NULL constraint rejects.
+    """
+    findings: list[Finding] = []
+    for stmt in migration.statements:
+        if stmt.type == StatementType.ADD_COLUMN:
+            details = stmt.details
+            if details.get("not_null") and not details.get("has_default"):
+                loc = f"{migration.path}: {stmt.raw[:80]}..."
+                findings.append(
+                    Finding(
+                        severity=Severity.UNSAFE,
+                        message=(
+                            f"ADD COLUMN `{stmt.column}` NOT NULL without DEFAULT on "
+                            f"`{stmt.table}` — fails on existing rows"
+                        ),
+                        migration_file=str(migration.path),
+                        line_hint=loc,
+                        suggestion=(
+                            "Add a DEFAULT value or make nullable:\n"
+                            "    Option A: ADD COLUMN ... NOT NULL DEFAULT 'value'\n"
+                            "    Option B: ADD COLUMN ... NULL (then backfill + add NOT NULL later)"
+                        ),
+                    )
+                )
+    return findings
+
+
+def detect_alter_column_type_unsafe(migration: MigrationFile) -> list[Finding]:
+    """Detect ALTER COLUMN TYPE that may have incompatible cast.
+
+    Some type changes (e.g., VARCHAR→INT, TEXT→BOOLEAN) fail on existing data.
+    """
+    findings: list[Finding] = []
+    risky_targets = {"int", "integer", "boolean", "serial"}
+
+    for stmt in migration.statements:
+        if stmt.type == StatementType.ALTER_COLUMN_TYPE:
+            new_type = stmt.details.get("new_type", "").lower().split("(")[0]
+            if new_type in risky_targets:
+                loc = f"{migration.path}: {stmt.raw[:80]}..."
+                findings.append(
+                    Finding(
+                        severity=Severity.WARNING,
+                        message=(
+                            f"ALTER COLUMN `{stmt.column}` TYPE to {new_type.upper()} on "
+                            f"`{stmt.table}` — may fail on existing data"
+                        ),
+                        migration_file=str(migration.path),
+                        line_hint=loc,
+                        suggestion=(
+                            "Verify all existing values can cast to the new type.\n"
+                            "Consider: ADD COLUMN with new type → backfill → DROP old column"
+                        ),
+                    )
+                )
+    return findings
+
+
+def detect_drop_table_type(migration: MigrationFile) -> list[Finding]:
+    """Detect DROP TABLE / DROP TYPE that may still be referenced.
+
+    Other tables, views, or application code may reference these.
+    """
+    findings: list[Finding] = []
+    for stmt in migration.statements:
+        if stmt.type == StatementType.DROP_TABLE:
+            loc = f"{migration.path}: {stmt.raw[:80]}..."
+            findings.append(
+                Finding(
+                    severity=Severity.WARNING,
+                    message=f"DROP TABLE `{stmt.table}` — may be referenced by other tables/views",
+                    migration_file=str(migration.path),
+                    line_hint=loc,
+                    suggestion="Verify no foreign keys, views, or application code references this table.",
+                )
+            )
+        elif stmt.type == StatementType.DROP_TYPE:
+            loc = f"{migration.path}: {stmt.raw[:80]}..."
+            findings.append(
+                Finding(
+                    severity=Severity.WARNING,
+                    message=f"DROP TYPE `{stmt.table}` — may be used by columns or functions",
+                    migration_file=str(migration.path),
+                    line_hint=loc,
+                    suggestion="Verify no columns or functions depend on this type.",
+                )
+            )
+    return findings
+
+
+def analyze_migration(migration: MigrationFile) -> list[Finding]:
+    """Run all safety detectors on a migration file."""
+    all_findings: list[Finding] = []
+    all_findings.extend(detect_drop_column_unsafe(migration))
+    all_findings.extend(detect_rename_column(migration))
+    all_findings.extend(detect_add_not_null_no_default(migration))
+    all_findings.extend(detect_alter_column_type_unsafe(migration))
+    all_findings.extend(detect_drop_table_type(migration))
+    return all_findings
+
+
+def has_unsafe_findings(findings: list[Finding]) -> bool:
+    """Check if any findings are UNSAFE or CRITICAL."""
+    return any(
+        f.severity in (Severity.UNSAFE, Severity.CRITICAL) for f in findings
+    )

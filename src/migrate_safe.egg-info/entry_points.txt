@@ -1,0 +1,2 @@
+[console_scripts]
+migrate-safe = migrate_safe.cli:main

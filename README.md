@@ -1,10 +1,8 @@
-# migrate-safe — Migration Safety Linter for Drizzle ORM
+# migrate-safe
 
-Detects unsafe SQL migrations that break rolling deployments.
+**Migration safety linter for Drizzle ORM** — detect unsafe SQL patterns before they break rolling deployments.
 
-## Problem
-
-Drizzle ORM (25k+ stars) generates SQL migrations that can break rolling deployments. When you `DROP COLUMN`, old pods crash. Django solved this with `django-migration-linter` — Drizzle has nothing equivalent.
+When you `DROP COLUMN` or `RENAME COLUMN` in a migration, old pods still reading that column crash while new pods have already removed it. `migrate-safe` catches these patterns in CI before they reach production.
 
 ## Install
 
@@ -15,44 +13,66 @@ pip install migrate-safe
 ## Usage
 
 ```bash
+# Check a single migration file
+migrate-safe check 0001_create_users.sql
+
 # Check a directory of migrations
 migrate-safe check ./drizzle/migrations
 
-# With config file
-migrate-safe check . --config .migratesafe.toml
+# Explain findings in detail
+migrate-safe explain ./drizzle/migrations
 
-# Output as SARIF (for CI)
-migrate-safe check . --format sarif --output results.sarif
+# Strict mode: fail on warnings too
+migrate-safe check --strict ./drizzle/migrations
 ```
 
-## Detectors
+## What it detects
 
-| Code | Description | Severity |
-|------|-------------|----------|
-| `MS001` | `DROP COLUMN` without prior nullable step | error |
-| `MS002` | `RENAME COLUMN` (breaks old pods immediately) | error |
-| `MS003` | `ADD COLUMN NOT NULL` without default | error |
-| `MS004` | `ALTER COLUMN TYPE` with incompatible cast | warning |
-| `MS005` | `DROP TABLE` that may still be referenced | warning |
+| Pattern | Severity | Why it breaks |
+|---------|----------|---------------|
+| `DROP COLUMN` | 🔴 UNSAFE | Old pods crash reading missing column |
+| `RENAME COLUMN` | 🔴 CRITICAL | Old pods expect old name, new pods expect new |
+| `ADD COLUMN NOT NULL` (no DEFAULT) | 🔴 UNSAFE | Fails on existing rows |
+| `ALTER COLUMN TYPE` (risky cast) | 🟡 WARNING | May fail on incompatible data |
+| `DROP TABLE` / `DROP TYPE` | 🟡 WARNING | May be referenced elsewhere |
 
-## Config (`.migratesafe.toml`)
+## Safe migration patterns
 
-```toml
-[migrate-safe]
-# Allow known-safe patterns
-allow = ["MS005"]
+### Instead of `DROP COLUMN`:
+```sql
+-- Step 1 (deploy): make nullable
+ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
 
-# Ignore specific migrations (already deployed)
-ignore-files = ["0001_initial.sql"]
-
-# Require two-step migration for DROP COLUMN
-require-two-step = true
+-- Step 2 (next PR, after old pods gone):
+ALTER TABLE users DROP COLUMN email;
 ```
 
-## Exit Codes
+### Instead of `RENAME COLUMN`:
+```sql
+-- Step 1: add new column
+ALTER TABLE users ADD COLUMN full_name VARCHAR(255);
 
-- `0` — all clear
-- `1` — unsafe migrations found
+-- Step 2 (deploy): backfill
+UPDATE users SET full_name = name;
+
+-- Step 3: update app code to use full_name
+
+-- Step 4 (next PR): drop old column
+ALTER TABLE users DROP COLUMN name;
+```
+
+## GitHub Action
+
+```yaml
+- uses: yunaremaia/migrate-safe@main
+  with:
+    path: './drizzle/migrations'
+```
+
+## Exit codes
+
+- `0` — no UNSAFE/CRITICAL findings (or no findings at all)
+- `1` — UNSAFE or CRITICAL findings detected
 
 ## License
 

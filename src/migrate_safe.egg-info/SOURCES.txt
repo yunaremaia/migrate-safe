@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/migrate_safe/__init__.py
+src/migrate_safe/cli.py
+src/migrate_safe/detectors.py
+src/migrate_safe/parser.py
+src/migrate_safe.egg-info/PKG-INFO
+src/migrate_safe.egg-info/SOURCES.txt
+src/migrate_safe.egg-info/dependency_links.txt
+src/migrate_safe.egg-info/entry_points.txt
+src/migrate_safe.egg-info/requires.txt
+src/migrate_safe.egg-info/top_level.txt
+tests/test_cli.py
+tests/test_detectors.py
+tests/test_parser.py
