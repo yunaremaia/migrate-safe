@@ -7,7 +7,7 @@ When you `DROP COLUMN` or `RENAME COLUMN` in a migration, old pods still reading
 ## Install
 
 ```bash
-pip install migrate-safe
+pip install git+https://github.com/yunaremaia/migrate-safe.git
 ```
 
 ## Usage
