@@ -26,7 +26,14 @@ runs:
 
     - name: Install migrate-safe
       shell: bash
-      run: pip install migrate-safe
+      env:
+        # migrate-safe is not published on PyPI, so pip cannot resolve the bare
+        # name (PyPI returns 404). Install from git instead, pinned to the ref
+        # this action was referenced by so the CLI always matches the action
+        # version. Falls back to the default branch for local `uses: ./` usage.
+        MIGRATE_SAFE_REF: ${{ github.action_ref }}
+      run: |
+        pip install "git+https://github.com/yunaremaia/migrate-safe.git@${MIGRATE_SAFE_REF:-master}"
 
     - name: Run migrate-safe check
       shell: bash
