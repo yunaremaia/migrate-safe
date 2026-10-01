@@ -1,21 +1,21 @@
 """Tests for migrate-safe parser."""
-from pathlib import Path
 import tempfile
-import pytest
+from pathlib import Path
 
 from migrate_safe.parser import (
-    parse_sql_file,
-    parse_migration_directory,
     StatementType,
-    SQLStatement,
+    parse_migration_directory,
+    parse_sql_file,
 )
 
 
 def _write_sql(content: str) -> Path:
     """Write SQL to a temp file and return its path."""
     f = tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False)
-    f.write(content)
-    f.close()
+    # delete=False keeps the file on disk after the block: parse_sql_file()
+    # re-opens it by path, so it must outlive this helper.
+    with f:
+        f.write(content)
     return Path(f.name)
 
 

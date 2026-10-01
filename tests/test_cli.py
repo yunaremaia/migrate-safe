@@ -1,8 +1,9 @@
 """Tests for migrate-safe CLI."""
-from click.testing import CliRunner
 import tempfile
-import pytest
 from pathlib import Path
+
+import pytest
+from click.testing import CliRunner
 
 from migrate_safe.cli import main
 

@@ -22,7 +22,6 @@ def main() -> None:
 
     Detects unsafe SQL migration patterns that can break rolling deployments.
     """
-    pass
 
 
 @main.command()
@@ -90,7 +89,11 @@ def check(path: str, strict: bool) -> None:
     console.print(table)
 
     # Suggestions
-    unsafe_suggestions = [f for f in all_findings if f.severity in (Severity.UNSAFE, Severity.CRITICAL) and f.suggestion]
+    unsafe_suggestions = [
+        f
+        for f in all_findings
+        if f.severity in (Severity.UNSAFE, Severity.CRITICAL) and f.suggestion
+    ]
     if unsafe_suggestions:
         console.print("\n[bold]Suggested fixes:[/bold]\n")
         for finding in unsafe_suggestions:

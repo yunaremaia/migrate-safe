@@ -182,7 +182,9 @@ def detect_drop_table_type(migration: MigrationFile) -> list[Finding]:
                     message=f"DROP TABLE `{stmt.table}` — may be referenced by other tables/views",
                     migration_file=str(migration.path),
                     line_hint=loc,
-                    suggestion="Verify no foreign keys, views, or application code references this table.",
+                    suggestion=(
+                        "Verify no foreign keys, views, or application code references this table."
+                    ),
                 )
             )
         elif stmt.type == StatementType.DROP_TYPE:

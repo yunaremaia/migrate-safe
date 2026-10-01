@@ -1,25 +1,29 @@
 """Tests for migrate-safe detectors."""
-from pathlib import Path
 import tempfile
-import pytest
+from pathlib import Path
 
-from migrate_safe.parser import parse_sql_file, MigrationFile, SQLStatement, StatementType
 from migrate_safe.detectors import (
+    Severity,
     analyze_migration,
-    detect_drop_column_unsafe,
-    detect_rename_column,
     detect_add_not_null_no_default,
     detect_alter_column_type_unsafe,
+    detect_drop_column_unsafe,
     detect_drop_table_type,
+    detect_rename_column,
     has_unsafe_findings,
-    Severity,
+)
+from migrate_safe.parser import (
+    MigrationFile,
+    parse_sql_file,
 )
 
 
 def _write_sql(content: str) -> Path:
     f = tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False)
-    f.write(content)
-    f.close()
+    # delete=False keeps the file on disk after the block: parse_sql_file()
+    # re-opens it by path, so it must outlive this helper.
+    with f:
+        f.write(content)
     return Path(f.name)
 
 
